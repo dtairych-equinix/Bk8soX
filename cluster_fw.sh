@@ -21,7 +21,7 @@ ESSENTIAL_RULES=(
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 {add|remove|list} [--ports PORTS] [--ips IPS]"
+    echo "Usage: $0 {add|remove|list} --ports PORTS [--ips IPS]"
     exit 1
 }
 
@@ -40,8 +40,8 @@ add_rules() {
         shift
     done
 
-    if [[ ${#PORTS[@]} -eq 0 || ${#IPS[@]} -eq 0 ]]; then
-        echo "Error: Ports and IPs must be specified for adding rules."
+    if [[ ${#PORTS[@]} -eq 0 ]]; then
+        echo "Error: Ports must be specified for adding rules."
         usage
     fi
 
@@ -61,13 +61,21 @@ add_rules() {
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
         IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
         for PORT in "${PORTS[@]}"; do
-            for DEST_IP in "${IPS[@]}"; do
-                ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw allow from $DEST_IP to any port $PORT"
+            if [[ ${#IPS[@]} -eq 0 ]]; then
+                ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw allow $PORT"
                 if [[ $? -ne 0 ]]; then
-                    echo "Failed to add rule on $IP: ufw allow from $DEST_IP to any port $PORT"
+                    echo "Failed to add rule on $IP: ufw allow $PORT"
                     exit 1
                 fi
-            done
+            else
+                for DEST_IP in "${IPS[@]}"; do
+                    ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw allow from $DEST_IP to any port $PORT"
+                    if [[ $? -ne 0 ]]; then
+                        echo "Failed to add rule on $IP: ufw allow from $DEST_IP to any port $PORT"
+                        exit 1
+                    fi
+                done
+            fi
         done
     done
 
@@ -89,8 +97,8 @@ remove_rules() {
         shift
     done
 
-    if [[ ${#PORTS[@]} -eq 0 || ${#IPS[@]} -eq 0 ]]; then
-        echo "Error: Ports and IPs must be specified for removing rules."
+    if [[ ${#PORTS[@]} -eq 0 ]]; then
+        echo "Error: Ports must be specified for removing rules."
         usage
     fi
 
@@ -110,18 +118,31 @@ remove_rules() {
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
         IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
         for PORT in "${PORTS[@]}"; do
-            for DEST_IP in "${IPS[@]}"; do
-                RULE="ufw allow from $DEST_IP to any port $PORT"
+            if [[ ${#IPS[@]} -eq 0 ]]; then
+                RULE="ufw allow $PORT"
                 if [[ ! " ${ESSENTIAL_RULES[@]} " =~ " ${RULE} " ]]; then
-                    ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw delete allow from $DEST_IP to any port $PORT"
+                    ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw delete allow $PORT"
                     if [[ $? -ne 0 ]]; then
-                        echo "Failed to remove rule on $IP: ufw allow from $DEST_IP to any port $PORT"
+                        echo "Failed to remove rule on $IP: ufw allow $PORT"
                         exit 1
                     fi
                 else
                     echo "Skipping removal of essential rule: $RULE"
                 fi
-            done
+            else
+                for DEST_IP in "${IPS[@]}"; do
+                    RULE="ufw allow from $DEST_IP to any port $PORT"
+                    if [[ ! " ${ESSENTIAL_RULES[@]} " =~ " ${RULE} " ]]; then
+                        ssh -i $PRIVATE_KEY_PATH "$IP" "sudo ufw delete allow from $DEST_IP to any port $PORT"
+                        if [[ $? -ne 0 ]]; then
+                            echo "Failed to remove rule on $IP: ufw allow from $DEST_IP to any port $PORT"
+                            exit 1
+                        fi
+                    else
+                        echo "Skipping removal of essential rule: $RULE"
+                    fi
+                done
+            fi
         done
     done
 
