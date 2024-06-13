@@ -3,6 +3,7 @@
 # Default values
 DEFAULT_DOMAIN="k8s.dev"
 DEFAULT_WORKER_COUNT=3
+PRIVATE_KEY_PATH="private_key"
 
 # Function to display usage
 usage() {
@@ -78,7 +79,7 @@ build() {
     # Append the contents of hosts file to the remote servers' /etc/hosts
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
         IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
-        ssh "$IP" "sudo sh -c 'cat >> /etc/hosts'" < hosts
+        ssh -i $PRIVATE_KEY_PATH "$IP" "sudo sh -c 'cat >> /etc/hosts'" < hosts
         if [[ $? -ne 0 ]]; then
             echo "Failed to update /etc/hosts on $IP"
             exit 1
@@ -86,6 +87,52 @@ build() {
     done
 
     echo "Hosts file updated successfully on all nodes."
+
+    # Run kubeadm init on the master node and capture the join command
+    KUBEADM_OUTPUT=$(ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo "kubeadm init failed on the master node. Exiting."
+        echo "$KUBEADM_OUTPUT"
+        exit 1
+    fi
+
+    # Extract the join command from the kubeadm output
+    JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | grep -o "kubeadm join.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*")
+    if [[ -z "$JOIN_COMMAND" ]]; then
+        echo "Failed to extract the kubeadm join command."
+        exit 1
+    fi
+
+    echo "Join command extracted: $JOIN_COMMAND"
+
+    # Copy kube config to local file
+    ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to copy kube config from the master node. Exiting."
+        exit 1
+    fi
+
+    echo "Kubernetes master initialized successfully and kube config copied to local file."
+
+    # Run the join command on each worker node
+    for WORKER_IP in "${WORKER_IPS[@]}"; do
+        ssh -i $PRIVATE_KEY_PATH "$WORKER_IP" "sudo $JOIN_COMMAND"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to join worker node $WORKER_IP to the cluster. Exiting."
+            exit 1
+        fi
+    done
+
+    echo "All worker nodes joined the cluster successfully."
+
+    # Install Calico on the master node
+    ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to install Calico on the master node. Exiting."
+        exit 1
+    fi
+
+    echo "Calico installed successfully on the cluster."
 }
 
 # Function to handle the destroy process
