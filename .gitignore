@@ -36,4 +36,5 @@ private_key
 .terraformrc
 terraform.rc
 
-/locals
+locals/*
+!locals/placeholder.md
