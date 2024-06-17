@@ -1,4 +1,4 @@
-${master.ip} ${master.hostname}
+${master_ip} ${master_hostname}
 %{ for instance in instances ~}
 ${instance.ip} ${instance.hostname}
 %{ endfor ~}
