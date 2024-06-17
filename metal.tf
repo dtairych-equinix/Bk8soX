@@ -5,13 +5,13 @@ resource "equinix_metal_ssh_key" "k8s" {
 
 resource "equinix_metal_project" "k8s" {
   name = "k8s Cluster"
-  organization_id = var.organization_id
+  organization_id = var.org_id
 }
 
 resource "equinix_metal_device" "master" {
-  hostname         = "master.k8s.dev"
+  hostname         = "master.${var.domain}"
   plan             = "m3.small.x86"
-  metro            = "am"
+  metro            = var.metro
   operating_system = "debian_12"
   billing_cycle    = "hourly"
   project_id       = equinix_metal_project.k8s.id
@@ -23,9 +23,9 @@ resource "equinix_metal_device" "master" {
 
 resource "equinix_metal_device" "workers" {
   count = var.worker_count
-  hostname = "worker-${count.index}.k8s.dev"
+  hostname = "worker-0${count.index + 1}.${var.domain}"
   plan             = "m3.small.x86"
-  metro            = "am"
+  metro            = var.metro
   operating_system = "debian_12"
   billing_cycle    = "hourly"
   project_id       = equinix_metal_project.k8s.id

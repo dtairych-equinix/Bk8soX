@@ -5,13 +5,13 @@ resource "tls_private_key" "ssh_key" {
 
 resource "local_file" "private_key" {
   content = tls_private_key.ssh_key.private_key_openssh
-  filename = "./private_key"
+  filename = "./locals/private_key"
   file_permission = "0600"
 }
 
 resource "local_file" "public_key" {
   content = tls_private_key.ssh_key.public_key_openssh
-  filename = "./public_key"
+  filename = "./locals/public_key"
   file_permission = "0600"
 }
 
@@ -20,7 +20,7 @@ data "http" "cloud_init" {
 }
 
 resource "local_file" "hosts" {
-  content = templatefile("./hosts.tftpl", {
+  content = templatefile("./locals/hosts.tftpl", {
     instances = [
         for idx, instance in equinix_metal_device.workers :
         {
@@ -32,7 +32,7 @@ resource "local_file" "hosts" {
     master_hostname = equinix_metal_device.master.hostname
   })
 
-  filename = "./hosts"
+  filename = "./locals/hosts"
   
 
 }
