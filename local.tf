@@ -20,7 +20,7 @@ data "http" "cloud_init" {
 }
 
 resource "local_file" "hosts" {
-  content = templatefile("./locals/hosts.tftpl", {
+  content = templatefile("./templates/hosts.tftpl", {
     instances = [
         for idx, instance in equinix_metal_device.workers :
         {
