@@ -43,7 +43,7 @@ build() {
     fi
 
     # Initiate terraform apply and capture the output
-    terraform apply -var "domain=$DOMAIN" -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" -var "worker_count=$WORKER_COUNT" | tee terraform_apply_output.log
+    terraform apply -var "domain=$DOMAIN" -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" -var "worker_count=$WORKER_COUNT" --auto-approve | tee terraform_apply_output.log
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "Terraform apply failed. Exiting."
         exit 1
@@ -58,11 +58,16 @@ build() {
     fi
 
     # Read the hosts file and identify master and workers
-    readarray -t HOST_ENTRIES < hosts
-    if [[ ${#HOST_ENTRIES[@]} -eq 0 ]]; then
-        echo "Error: hosts file is empty."
-        exit 1
-    fi
+    # readarray -t HOST_ENTRIES < hosts
+    # echo "HOST_ENTRIES array: ${HOST_ENTRIES[@]}"
+    # if [[ ${#HOST_ENTRIES[@]} -eq 0 ]]; then
+    #     echo "Error: hosts file is empty."
+    #     exit 1
+    # fi
+    HOST_ENTRIES=()
+    while IFS= read -r line; do
+        HOST_ENTRIES+=("$line")
+    done < hosts
 
     MASTER_IP=$(echo "${HOST_ENTRIES[0]}" | awk '{print $1}')
     MASTER_HOSTNAME=$(echo "${HOST_ENTRIES[0]}" | awk '{print $2}')
@@ -79,7 +84,7 @@ build() {
     # Append the contents of hosts file to the remote servers' /etc/hosts
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
         IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
-        ssh -i $PRIVATE_KEY_PATH "$IP" "sudo sh -c 'cat >> /etc/hosts'" < hosts
+        ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$IP" "sudo sh -c 'cat >> /etc/hosts'" < hosts
         if [[ $? -ne 0 ]]; then
             echo "Failed to update /etc/hosts on $IP"
             exit 1
@@ -89,7 +94,7 @@ build() {
     echo "Hosts file updated successfully on all nodes."
 
     # Run kubeadm init on the master node and capture the join command
-    KUBEADM_OUTPUT=$(ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1)
+    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo "kubeadm init failed on the master node. Exiting."
         echo "$KUBEADM_OUTPUT"
@@ -106,7 +111,7 @@ build() {
     echo "Join command extracted: $JOIN_COMMAND"
 
     # Copy kube config to local file
-    ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
+    ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
     if [[ $? -ne 0 ]]; then
         echo "Failed to copy kube config from the master node. Exiting."
         exit 1
@@ -116,7 +121,7 @@ build() {
 
     # Run the join command on each worker node
     for WORKER_IP in "${WORKER_IPS[@]}"; do
-        ssh -i $PRIVATE_KEY_PATH "$WORKER_IP" "sudo $JOIN_COMMAND"
+        ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$WORKER_IP" "sudo $JOIN_COMMAND"
         if [[ $? -ne 0 ]]; then
             echo "Failed to join worker node $WORKER_IP to the cluster. Exiting."
             exit 1
@@ -126,7 +131,7 @@ build() {
     echo "All worker nodes joined the cluster successfully."
 
     # Install Calico on the master node
-    ssh -i $PRIVATE_KEY_PATH "$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
+    ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
     if [[ $? -ne 0 ]]; then
         echo "Failed to install Calico on the master node. Exiting."
         exit 1
