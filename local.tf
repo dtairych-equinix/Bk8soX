@@ -19,7 +19,7 @@ data "http" "cloud_init" {
   url = "https://raw.githubusercontent.com/dtairych/k8s-cloudinit/main/cloud-init.yml"
 }
 
-data "local_file" "hosts" {
+resource "local_file" "hosts" {
   content = templatefile("./hosts.tftpl", {
     instances = [
         for idx, instance in equinix_metal_device.workers :
@@ -27,8 +27,12 @@ data "local_file" "hosts" {
             ip = instance.access_public_ipv4
             hostname = instance.hostname
         }
-    ]
+    ],
+    master_ip = equinix_metal_device.master.access_public_ipv4,
+    master_hostname = equinix_metal_device.master.hostname
   })
 
   filename = "./hosts"
+  
+
 }
