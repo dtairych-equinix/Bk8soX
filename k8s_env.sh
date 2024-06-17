@@ -3,7 +3,9 @@
 # Default values
 DEFAULT_DOMAIN="k8s.dev"
 DEFAULT_WORKER_COUNT=3
-PRIVATE_KEY_PATH="private_key"
+PRIVATE_KEY_PATH="./locals/private_key"
+HOST_FILE_PATH="./locals/hosts"
+SSH_USER="root"
 
 # Function to display usage
 usage() {
@@ -52,22 +54,16 @@ build() {
     echo "Terraform apply completed successfully. Proceeding to the next phase..."
 
     # Parse the hosts file
-    if [[ ! -f hosts ]]; then
+    if [[ ! -f "$HOST_FILE_PATH" ]]; then
         echo "Error: hosts file not found."
         exit 1
     fi
 
     # Read the hosts file and identify master and workers
-    # readarray -t HOST_ENTRIES < hosts
-    # echo "HOST_ENTRIES array: ${HOST_ENTRIES[@]}"
-    # if [[ ${#HOST_ENTRIES[@]} -eq 0 ]]; then
-    #     echo "Error: hosts file is empty."
-    #     exit 1
-    # fi
     HOST_ENTRIES=()
     while IFS= read -r line; do
         HOST_ENTRIES+=("$line")
-    done < hosts
+    done < "$HOST_FILE_PATH"
 
     MASTER_IP=$(echo "${HOST_ENTRIES[0]}" | awk '{print $1}')
     MASTER_HOSTNAME=$(echo "${HOST_ENTRIES[0]}" | awk '{print $2}')
@@ -84,7 +80,7 @@ build() {
     # Append the contents of hosts file to the remote servers' /etc/hosts
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
         IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
-        ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$IP" "sudo sh -c 'cat >> /etc/hosts'" < hosts
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$IP" "sudo sh -c 'cat >> /etc/hosts'" < "$HOST_FILE_PATH"
         if [[ $? -ne 0 ]]; then
             echo "Failed to update /etc/hosts on $IP"
             exit 1
@@ -93,8 +89,16 @@ build() {
 
     echo "Hosts file updated successfully on all nodes."
 
+    # Wait for cloud-init to complete
+    CLOUD_INIT_MARKER="/var/lib/cloud/instance/boot-finished"
+    while true; do
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo test -f $CLOUD_INIT_MARKER" && break
+        echo "Waiting for cloud-init to complete on the master node..."
+        sleep 10
+    done
+    
     # Run kubeadm init on the master node and capture the join command
-    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1)
+    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1 | tee >(cat >&2))
     if [[ $? -ne 0 ]]; then
         echo "kubeadm init failed on the master node. Exiting."
         echo "$KUBEADM_OUTPUT"
@@ -111,7 +115,7 @@ build() {
     echo "Join command extracted: $JOIN_COMMAND"
 
     # Copy kube config to local file
-    ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
     if [[ $? -ne 0 ]]; then
         echo "Failed to copy kube config from the master node. Exiting."
         exit 1
@@ -121,7 +125,7 @@ build() {
 
     # Run the join command on each worker node
     for WORKER_IP in "${WORKER_IPS[@]}"; do
-        ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$WORKER_IP" "sudo $JOIN_COMMAND"
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$WORKER_IP" "sudo $JOIN_COMMAND"
         if [[ $? -ne 0 ]]; then
             echo "Failed to join worker node $WORKER_IP to the cluster. Exiting."
             exit 1
@@ -131,7 +135,7 @@ build() {
     echo "All worker nodes joined the cluster successfully."
 
     # Install Calico on the master node
-    ssh -o "StrictHostKeyChecking=no" -i $PRIVATE_KEY_PATH root@"$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
     if [[ $? -ne 0 ]]; then
         echo "Failed to install Calico on the master node. Exiting."
         exit 1
