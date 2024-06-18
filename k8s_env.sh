@@ -211,7 +211,7 @@ destroy() {
     validate_params
 
     # Initiate terraform destroy and capture the output
-    terraform destroy -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" | tee terraform_destroy_output.log
+    terraform destroy -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" --auto-approve | tee terraform_destroy_output.log
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "Terraform destroy failed. Exiting."
         exit 1
