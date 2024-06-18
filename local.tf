@@ -36,3 +36,12 @@ resource "local_file" "hosts" {
   
 
 }
+
+resource "local_file" "kubelet" {
+  content = templatefile("./templates/kubelet.tftpl", {
+    domain = var.domain
+  })
+
+  filename = "./locals/kubelet.yaml"
+
+}
