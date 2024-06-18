@@ -1,0 +1,16 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: stable
+networking:
+  serviceSubnet: "172.16.0.0/16"
+  podSubnet: "192.168.0.0/16"
+  dnsDomain: "${domain}"
+controlPlaneEndpoint: "master.${domain}:6443"
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: "iptables"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
