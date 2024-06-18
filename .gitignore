@@ -38,3 +38,7 @@ terraform.rc
 
 locals/*
 !locals/placeholder.md
+
+*.log
+
+kube_config

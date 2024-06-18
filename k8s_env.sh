@@ -13,9 +13,8 @@ usage() {
     exit 1
 }
 
-# Function to handle the build process
-build() {
-    # Parse arguments
+# Function to parse arguments
+parse_args() {
     while [[ "$#" -gt 0 ]]; do
         case $1 in
             --domain) DOMAIN="$2"; shift ;;
@@ -32,8 +31,10 @@ build() {
     AUTH_TOKEN="${AUTH_TOKEN:-$AUTH_TOKEN_ENV}"
     ORG_ID="${ORG_ID:-$ORG_ID_ENV}"
     WORKER_COUNT="${WORKER_COUNT:-${WORKER_COUNT_ENV:-$DEFAULT_WORKER_COUNT}}"
+}
 
-    # Validate required parameters
+# Function to validate required parameters
+validate_params() {
     if [[ -z "$AUTH_TOKEN" ]]; then
         echo "Error: auth_token is required"
         usage
@@ -43,14 +44,122 @@ build() {
         echo "Error: org_id is required"
         usage
     fi
+}
 
-    # Initiate terraform apply and capture the output
+# Function to update /etc/hosts on all nodes
+update_hosts_file() {
+    for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
+        IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$IP" "sudo sh -c 'cat >> /etc/hosts'" < "$HOST_FILE_PATH"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to update /etc/hosts on $IP"
+            exit 1
+        fi
+    done
+    echo "Hosts file updated successfully on all nodes."
+}
+
+# Function to wait for cloud-init to complete on the master node
+wait_for_cloud_init() {
+    CLOUD_INIT_MARKER="/var/lib/cloud/instance/boot-finished"
+    while true; do
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo test -f $CLOUD_INIT_MARKER" && break
+        echo "Waiting for cloud-init to complete on the master node..."
+        sleep 10
+    done
+}
+
+# Function to copy the kubelet configuration file to the master node
+copy_kubelet_config() {
+    scp -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" ./locals/kubelet.yaml "$SSH_USER@$MASTER_IP:/tmp/kubelet.yaml"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to copy kubelet.yaml to the master node. Exiting."
+        exit 1
+    fi
+    echo "kubelet.yaml copied to the master node successfully."
+}
+
+# Function to initialize the master node
+initialize_master_node() {
+    # Copy the kubelet configuration file to the master node
+    copy_kubelet_config
+
+    # Run kubeadm init on the master node and capture the join command
+    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --config=/tmp/kubelet.yaml" 2>&1 | tee >(cat >&2))
+    if [[ $? -ne 0 ]]; then
+        echo "kubeadm init failed on the master node. Exiting."
+        echo "$KUBEADM_OUTPUT"
+        exit 1
+    fi
+
+    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | sed -n '/kubeadm join/,/sha256:/p' | sed 's/^[ \t]*//')
+    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | awk '/kubeadm join/,/\\/' | tr -d '\\' | tr -d '\n')
+    JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | awk '
+        BEGIN {count = 0; join_cmd = ""} 
+        /kubeadm join/ {count++} 
+        count == 2 {join_cmd = join_cmd $0; getline; while($0 ~ /\\$/) {join_cmd = join_cmd $0; getline} join_cmd = join_cmd $0} 
+        END {print join_cmd}' | sed 's/\\//g')
+    if [[ -z "$JOIN_COMMAND" ]]; then
+        echo "Failed to extract the kubeadm join command."
+        exit 1
+    fi
+    echo "--------"
+    echo "Join command extracted: $JOIN_COMMAND"
+    echo "--------"
+
+    # Set KUBECONFIG on the master node
+    # ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "export KUBECONFIG=/etc/kubernetes/admin.conf"
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "echo 'export KUBECONFIG=/etc/kubernetes/admin.conf' >> /root/.bashrc && source /root/.bashrc"
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl config rename-context kubernetes-admin@kubernetes equinix_k8s"
+
+}
+
+# Function to copy kube config from the master node
+copy_kube_config() {
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to copy kube config from the master node. Exiting."
+        exit 1
+    fi
+    echo "Kubernetes master initialized successfully and kube config copied to local file."
+}
+
+# Function to join worker nodes to the cluster
+join_worker_nodes() {
+    for WORKER_IP in "${WORKER_IPS[@]}"; do
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$WORKER_IP" "sudo $JOIN_COMMAND"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to join worker node $WORKER_IP to the cluster. Exiting."
+            exit 1
+        fi
+    done
+    echo "All worker nodes joined the cluster successfully."
+}
+
+# Function to install Calico on the master node
+install_calico() {
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to install Calico on the master node. Exiting."
+        exit 1
+    fi
+    echo "Calico installed successfully on the cluster."
+}
+
+# Function to handle the build process
+build() {
+    parse_args "$@"
+    validate_params
+
+    # Initialize Terraform
+    terraform init
+
+    # Apply Terraform configuration
     terraform apply -var "domain=$DOMAIN" -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" -var "worker_count=$WORKER_COUNT" --auto-approve | tee terraform_apply_output.log
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "Terraform apply failed. Exiting."
         exit 1
     fi
-
     echo "Terraform apply completed successfully. Proceeding to the next phase..."
 
     # Parse the hosts file
@@ -59,7 +168,6 @@ build() {
         exit 1
     fi
 
-    # Read the hosts file and identify master and workers
     HOST_ENTRIES=()
     while IFS= read -r line; do
         HOST_ENTRIES+=("$line")
@@ -77,106 +185,30 @@ build() {
         fi
     done
 
-    # Append the contents of hosts file to the remote servers' /etc/hosts
-    for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
-        IP=$(echo "$HOST_ENTRY" | awk '{print $1}')
-        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$IP" "sudo sh -c 'cat >> /etc/hosts'" < "$HOST_FILE_PATH"
-        if [[ $? -ne 0 ]]; then
-            echo "Failed to update /etc/hosts on $IP"
-            exit 1
-        fi
-    done
+    # Update /etc/hosts on all nodes
+    update_hosts_file
 
-    echo "Hosts file updated successfully on all nodes."
+    # Wait for cloud-init to complete on the master node
+    wait_for_cloud_init
 
-    # Wait for cloud-init to complete
-    CLOUD_INIT_MARKER="/var/lib/cloud/instance/boot-finished"
-    while true; do
-        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo test -f $CLOUD_INIT_MARKER" && break
-        echo "Waiting for cloud-init to complete on the master node..."
-        sleep 10
-    done
-
-    # Run kubeadm init on the master node and capture the join command
-    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1 | tee >(cat >&2))
-    if [[ $? -ne 0 ]]; then
-        echo "kubeadm init failed on the master node. Exiting."
-        echo "$KUBEADM_OUTPUT"
-        exit 1
-    fi
-
-    # Extract the join command from the kubeadm output
-    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | grep -o "kubeadm join.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*")
-    # if [[ -z "$JOIN_COMMAND" ]]; then
-    #     echo "Failed to extract the kubeadm join command."
-    #     exit 1
-    # fi
-
-    JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | sed -n '/kubeadm join/,/sha256:/p' | sed 's/^[ \t]*//')
-    # JOIN_COMMAND=$(sed -zn 's/^.*kubeadm join\(.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*\).*/\1/p' <<< "$KUBEADM_OUTPUT")
-    if [[ -z "$JOIN_COMMAND" ]]; then
-        echo "Failed to extract the kubeadm join command."
-        exit 1
-    fi
-
-    echo "Join command extracted: $JOIN_COMMAND"
+    # Initialize the master node and extract join command
+    initialize_master_node
 
     # Copy kube config to local file
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
-    if [[ $? -ne 0 ]]; then
-        echo "Failed to copy kube config from the master node. Exiting."
-        exit 1
-    fi
+    copy_kube_config
 
-    echo "Kubernetes master initialized successfully and kube config copied to local file."
-
-    # Run the join command on each worker node
-    for WORKER_IP in "${WORKER_IPS[@]}"; do
-        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$WORKER_IP" "sudo $JOIN_COMMAND"
-        if [[ $? -ne 0 ]]; then
-            echo "Failed to join worker node $WORKER_IP to the cluster. Exiting."
-            exit 1
-        fi
-    done
-
-    echo "All worker nodes joined the cluster successfully."
+    # Join worker nodes to the cluster
+    join_worker_nodes
 
     # Install Calico on the master node
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
-    if [[ $? -ne 0 ]]; then
-        echo "Failed to install Calico on the master node. Exiting."
-        exit 1
-    fi
+    install_calico
 
-    echo "Calico installed successfully on the cluster."
 }
 
 # Function to handle the destroy process
 destroy() {
-    # Parse arguments
-    while [[ "$#" -gt 0 ]]; do
-        case $1 in
-            --auth_token) AUTH_TOKEN="$2"; shift ;;
-            --org_id) ORG_ID="$2"; shift ;;
-            *) echo "Unknown parameter passed: $1"; usage ;;
-        esac
-        shift
-    done
-
-    # Check environment variables if flags are not provided
-    AUTH_TOKEN="${AUTH_TOKEN:-$AUTH_TOKEN_ENV}"
-    ORG_ID="${ORG_ID:-$ORG_ID_ENV}"
-
-    # Validate required parameters
-    if [[ -z "$AUTH_TOKEN" ]]; then
-        echo "Error: auth_token is required"
-        usage
-    fi
-
-    if [[ -z "$ORG_ID" ]]; then
-        echo "Error: org_id is required"
-        usage
-    fi
+    parse_args "$@"
+    validate_params
 
     # Initiate terraform destroy and capture the output
     terraform destroy -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" | tee terraform_destroy_output.log
@@ -185,10 +217,15 @@ destroy() {
         exit 1
     fi
 
+    if [[ -f "kube_config" ]]; then
+        rm "kube_config"
+        echo "Deleted kube_config file."
+    fi
+
     echo "Terraform destroy completed successfully."
 }
 
-# Check the first argument
+# Main script execution
 if [[ "$1" == "build" ]]; then
     shift
     build "$@"
