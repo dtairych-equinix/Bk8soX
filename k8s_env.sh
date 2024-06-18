@@ -96,7 +96,7 @@ build() {
         echo "Waiting for cloud-init to complete on the master node..."
         sleep 10
     done
-    
+
     # Run kubeadm init on the master node and capture the join command
     KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --pod-network-cidr=192.168.0.0/16" 2>&1 | tee >(cat >&2))
     if [[ $? -ne 0 ]]; then
@@ -106,7 +106,14 @@ build() {
     fi
 
     # Extract the join command from the kubeadm output
-    JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | grep -o "kubeadm join.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*")
+    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | grep -o "kubeadm join.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*")
+    # if [[ -z "$JOIN_COMMAND" ]]; then
+    #     echo "Failed to extract the kubeadm join command."
+    #     exit 1
+    # fi
+
+    JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | sed -n '/kubeadm join/,/sha256:/p' | sed 's/^[ \t]*//')
+    # JOIN_COMMAND=$(sed -zn 's/^.*kubeadm join\(.*--discovery-token-ca-cert-hash sha256:[a-f0-9]*\).*/\1/p' <<< "$KUBEADM_OUTPUT")
     if [[ -z "$JOIN_COMMAND" ]]; then
         echo "Failed to extract the kubeadm join command."
         exit 1
