@@ -24,10 +24,15 @@ The output of this script is a kubeconfig file that can be used to execute comma
 
 ### Setting up variables
 
-The control script is responsible for building the infrastructure as well as configuring the cluster, in combination with a cloud-init file stored here: 
+The control script is responsible for building the infrastructure as well as configuring the cluster, in combination with a cloud-init file stored here: https://github.com/dtairych/k8s-cloudinit.  The Cloud Init is used to bring the host into a compliant state with the Kubernetes deployment.
+
 The cluster build only requires two main inputs:
 1. Equinix Metal API key
 2. Equinix Metal Org ID
+
+There are optional inputs for:
+1. The Domain name (for the cluster) - default is k8s.dev
+2. The number of worker nodes - default is 3
 
 These can be set as command line flags, or environment variables.  A future consideration will also be to check for a local *.tfvars files and extract them from there to create a "native" Terraform variable handler as well.
 
