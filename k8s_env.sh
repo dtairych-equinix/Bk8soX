@@ -6,6 +6,7 @@ DEFAULT_WORKER_COUNT=3
 PRIVATE_KEY_PATH="./locals/private_key"
 HOST_FILE_PATH="./locals/hosts"
 SSH_USER="root"
+LOCAL_HOSTS_FILE="/etc/hosts"
 
 # Function to display usage
 usage() {
@@ -46,6 +47,68 @@ validate_params() {
     fi
 }
 
+# Function to append hosts file entries to local hosts file
+append_to_local_hosts() {
+    echo "Appending hosts file entries to local hosts file..."
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        LOCAL_HOSTS_FILE="/etc/hosts"
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+        LOCAL_HOSTS_FILE="C:\Windows\System32\drivers\etc\hosts"
+    fi
+
+    sudo cat "$HOST_FILE_PATH" >> "$LOCAL_HOSTS_FILE"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to append entries to local hosts file.  Please complete this step manually."
+    fi
+    echo "Entries appended to local hosts file successfully."
+}
+
+# Function to remove hosts file entries from local hosts file
+remove_from_local_hosts() {
+    echo "Removing hosts file entries from local hosts file..."
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        LOCAL_HOSTS_FILE="/etc/hosts"
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+        LOCAL_HOSTS_FILE="C:\Windows\System32\drivers\etc\hosts"
+    fi
+
+    while read -r line; do
+        sudo sed -i.bak "/$line/d" "$LOCAL_HOSTS_FILE"
+    done < "$HOST_FILE_PATH"
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to remove entries from local hosts file.  Please remove them manually."
+    fi
+    echo "Entries removed from local hosts file successfully."
+}
+
+# Function to check for and apply Portworx config if it exists
+apply_portworx_config() {
+    PORTWORX_CONFIG=$(find ./locals -type f -name "*.yaml" ! -name "kubelet.yaml")
+    if [[ -n "$PORTWORX_CONFIG" ]]; then
+        echo "Portworx config found: $PORTWORX_CONFIG"
+        scp -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$PORTWORX_CONFIG" "$SSH_USER@$MASTER_IP:/etc/kubernetes/portworx.yaml"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to copy Portworx config to the master node. Exiting."
+            exit 1
+        fi
+        # Install Portworx CRDs
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f 'https://install.portworx.com/3.1?comp=pxoperator&kbver=1.28.1&ns=portworx'"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to install Portworx CRDs on the master node. Exiting."
+            exit 1
+        fi
+        # Apply Portworx config
+        ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/portworx.yaml"
+        if [[ $? -ne 0 ]]; then
+            echo "Failed to apply Portworx config on the master node. Exiting."
+            exit 1
+        fi
+        echo "Portworx config applied successfully on the cluster."
+    else
+        echo "No Portworx config found. Skipping Portworx installation."
+    fi
+}
+
 # Function to update /etc/hosts on all nodes
 update_hosts_file() {
     for HOST_ENTRY in "${HOST_ENTRIES[@]}"; do
@@ -71,7 +134,7 @@ wait_for_cloud_init() {
 
 # Function to copy the kubelet configuration file to the master node
 copy_kubelet_config() {
-    scp -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" ./locals/kubelet.yaml "$SSH_USER@$MASTER_IP:/tmp/kubelet.yaml"
+    scp -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" ./locals/kubelet.yaml "$SSH_USER@$MASTER_IP:/etc/kubernetes/kubelet.yaml"
     if [[ $? -ne 0 ]]; then
         echo "Failed to copy kubelet.yaml to the master node. Exiting."
         exit 1
@@ -85,15 +148,14 @@ initialize_master_node() {
     copy_kubelet_config
 
     # Run kubeadm init on the master node and capture the join command
-    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --config=/tmp/kubelet.yaml" 2>&1 | tee >(cat >&2))
+    KUBEADM_OUTPUT=$(ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo kubeadm init --config=/etc/kubernetes/kubelet.yaml" 2>&1 | tee >(cat >&2))
     if [[ $? -ne 0 ]]; then
         echo "kubeadm init failed on the master node. Exiting."
         echo "$KUBEADM_OUTPUT"
         exit 1
     fi
 
-    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | sed -n '/kubeadm join/,/sha256:/p' | sed 's/^[ \t]*//')
-    # JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | awk '/kubeadm join/,/\\/' | tr -d '\\' | tr -d '\n')
+    # Extract the second join command for worker nodes
     JOIN_COMMAND=$(echo "$KUBEADM_OUTPUT" | awk '
         BEGIN {count = 0; join_cmd = ""} 
         /kubeadm join/ {count++} 
@@ -103,25 +165,36 @@ initialize_master_node() {
         echo "Failed to extract the kubeadm join command."
         exit 1
     fi
-    echo "--------"
+
     echo "Join command extracted: $JOIN_COMMAND"
-    echo "--------"
+
+    # Rename context on the master node
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "KUBECONFIG=/etc/kubernetes/admin.conf kubectl config rename-context kubernetes-admin@kubernetes equinix_k8s"
+
+    # Copy kube config to local file
+    copy_kube_config
 
     # Set KUBECONFIG on the master node
-    # ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "export KUBECONFIG=/etc/kubernetes/admin.conf"
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "echo 'export KUBECONFIG=/etc/kubernetes/admin.conf' >> /root/.bashrc && source /root/.bashrc"
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl config rename-context kubernetes-admin@kubernetes equinix_k8s"
+    set_kubeconfig_on_master
+}
 
+# Function to set KUBECONFIG on the master node
+set_kubeconfig_on_master() {
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "echo 'export KUBECONFIG=/etc/kubernetes/admin.conf' >> /root/.bashrc && source /root/.bashrc"
 }
 
 # Function to copy kube config from the master node
 copy_kube_config() {
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "sudo cat /etc/kubernetes/admin.conf" > kube_config
+    scp -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP:/etc/kubernetes/admin.conf" ./kube_config
     if [[ $? -ne 0 ]]; then
         echo "Failed to copy kube config from the master node. Exiting."
         exit 1
     fi
     echo "Kubernetes master initialized successfully and kube config copied to local file."
+
+    # Set context name in kubeconfig
+    kubectl config set-context equinix_k8s --cluster=my-cluster --user=kubernetes-admin --kubeconfig=./kube_config
+    kubectl config use-context equinix_k8s --kubeconfig=./kube_config
 }
 
 # Function to join worker nodes to the cluster
@@ -138,7 +211,7 @@ join_worker_nodes() {
 
 # Function to install Calico on the master node
 install_calico() {
-    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
+    ssh -o "StrictHostKeyChecking=no" -i "$PRIVATE_KEY_PATH" "$SSH_USER@$MASTER_IP" "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml"
     if [[ $? -ne 0 ]]; then
         echo "Failed to install Calico on the master node. Exiting."
         exit 1
@@ -188,27 +261,33 @@ build() {
     # Update /etc/hosts on all nodes
     update_hosts_file
 
-    # Wait for cloud-init to complete on the master node
+    # Append hosts file entries to local hosts file
+    append_to_local_hosts
+
+    # Wait for cloud init to complete
     wait_for_cloud_init
 
-    # Initialize the master node and extract join command
+    # Initialize the master node
     initialize_master_node
-
-    # Copy kube config to local file
-    copy_kube_config
 
     # Join worker nodes to the cluster
     join_worker_nodes
 
-    # Install Calico on the master node
+    # Install Calico
     install_calico
 
+    # Apply Portworx config if it exists
+    # apply_portworx_config
 }
 
 # Function to handle the destroy process
 destroy() {
     parse_args "$@"
     validate_params
+
+    # Remove hosts file entries from local hosts file
+    # Must be done before terraform destroy because file will be deleted
+    remove_from_local_hosts
 
     # Initiate terraform destroy and capture the output
     terraform destroy -var "auth_token=$AUTH_TOKEN" -var "org_id=$ORG_ID" --auto-approve | tee terraform_destroy_output.log
@@ -222,10 +301,12 @@ destroy() {
         echo "Deleted kube_config file."
     fi
 
+    
+
     echo "Terraform destroy completed successfully."
 }
 
-# Main script execution
+# Check the first argument
 if [[ "$1" == "build" ]]; then
     shift
     build "$@"
